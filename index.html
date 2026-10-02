@@ -218,7 +218,7 @@ details.hist summary{cursor:pointer;font-weight:600;font-size:14px;padding:2px 0
 <div class="wrap">
   <header>
     <div><h1>Регистър фактури</h1><p class="sub" id="subLine">Зареждам…</p></div>
-    <div class="actions"><span class="pill" id="rolePill" hidden></span><span class="pill" id="syncDot" hidden>Записвам…</span><button class="btn" id="refreshBtn" type="button" hidden>Обнови</button><button class="btn" id="pkgBtn" type="button" hidden title="Изпраща Excel и файловете за избрания месец (или миналия) на счетоводителя">Към счетоводителя</button><button class="btn" id="bankBtn" type="button" hidden title="Качи извлечение от Булбанк Онлайн (CSV) — платените фактури се отбелязват сами">Банково извлечение</button><input type="file" id="bankIn" accept=".csv,text/csv" hidden><button class="btn primary" id="exportBtn" type="button" hidden>Изтегли Excel</button></div>
+    <div class="actions"><span class="pill" id="rolePill" hidden></span><span class="pill" id="syncDot" hidden>Записвам…</span><button class="btn" id="refreshBtn" type="button" hidden>Обнови</button><button class="btn" id="pkgBtn" type="button" hidden title="Изпраща Excel и файловете за избрания месец (или миналия) на счетоводителя">Към счетоводителя</button><button class="btn" id="bankBtn" type="button" hidden title="Качи извлечение от Булбанк Онлайн (CSV или PDF) — платените фактури се отбелязват сами">Банково извлечение</button><input type="file" id="bankIn" accept=".csv,text/csv,.pdf,application/pdf" hidden><button class="btn primary" id="exportBtn" type="button" hidden>Изтегли Excel</button></div>
   </header>
 
   <nav class="secnav" id="secNav" hidden aria-label="Раздел">
@@ -758,13 +758,62 @@ if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catc
     });
     return out;
   }
+  // PDF извлечение: текстът се чете с pdf.js, редовете се сглобяват по позиция,
+  // а дебит/кредит се познава по колоната („Дебит“/„Кредит“), по маркер ДТ/КТ или по знака минус.
+  async function parseBankPdf(file) {
+    const pdf = await (await loadPdf()).getDocument({ data: new Uint8Array(await file.arrayBuffer()), isEvalSupported: false }).promise;
+    const lines = [];
+    for (let pn = 1; pn <= pdf.numPages; pn++) {
+      const tc = await (await pdf.getPage(pn)).getTextContent(), toks = [];
+      tc.items.forEach(it => { const str = it.str || ""; if (!str.trim()) return;
+        const x0 = it.transform[4], y = it.transform[5], w = it.width || str.length * 5;
+        str.replace(/[-+]?\d{1,3}(?:[ \u00a0]\d{3})+(?:[.,]\d{2})?-?(?!\S)|\S+/g, (t, i) => { toks.push({ t, x: x0 + w * (i + t.length / 2) / str.length, y }); return t; }); });
+      toks.sort((a, b) => b.y - a.y || a.x - b.x);
+      const pl = [];
+      toks.forEach(k => { const L = pl.find(l => Math.abs(l.y - k.y) < 3); L ? L.toks.push(k) : pl.push({ y: k.y, toks: [k] }); });
+      pl.sort((a, b) => b.y - a.y).forEach(l => { l.toks.sort((a, b) => a.x - b.x); l.text = l.toks.map(k => k.t).join(" "); lines.push(l); });
+    }
+    if (!lines.length) throw new Error("PDF-ът няма текст (вероятно е сканиран). Свали извлечението от Булбанк Онлайн като PDF или CSV.");
+    let col = null;
+    const head = t => { const T = t.toLowerCase().replace(/[^a-zа-я]/g, "");
+      return /^(дебит|дт|debit|dr|теглене|withdrawal)$/.test(T) ? "d" : /^(кредит|кт|credit|cr|постъпление|deposit)$/.test(T) ? "c" : /^(салдо|balance|наличност)$/.test(T) ? "b" : ""; };
+    const isAmt = t => /^[-+]?\d{1,3}(?:[ . ]?\d{3})*,\d{2}-?$|^[-+]?\d+\.\d{2}-?$/.test(t);
+    const dateRe = /^(\d{1,2})[./](\d{1,2})[./](\d{2}|\d{4})$/;
+    const out = []; let cur = null;
+    const flush = () => { if (cur && cur.amount && cur.dir === "d") { const details = cur.parts.join(" ").replace(/\s+/g, " ").trim();
+      const ref = (details.match(/\b(?=[A-Z0-9]*\d)(?=[A-Z0-9]*[A-Z])[A-Z0-9]{10,}\b/) || [""])[0];
+      out.push({ date: cur.date, amount: cur.amount, details, kind: "", ref }); } cur = null; };
+    lines.forEach(l => {
+      // заглавен ред с колоните
+      const hs = l.toks.map(k => ({ h: head(k.t), x: k.x })).filter(o => o.h);
+      if (hs.some(o => o.h === "d") && hs.some(o => o.h === "c")) { flush(); col = {}; hs.forEach(o => col[o.h] = o.x); return; }
+      if (/салдо|оборот|общо|total|balance|итого/i.test(l.text) && !dateRe.test(l.toks[0].t)) { flush(); return; }
+      const m = l.toks[0].t.match(dateRe);
+      if (m) { flush(); const y = m[3].length === 2 ? "20" + m[3] : m[3];
+        cur = { date: `${y}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`, amount: 0, dir: "", parts: [] }; }
+      if (!cur) return;
+      const amts = [], words = [];
+      l.toks.forEach((k, i) => { if (isAmt(k.t)) amts.push(k); else if (!(i < 2 && dateRe.test(k.t))) words.push(k.t); });
+      const mark = words.find(w => /^(ДТ|Д|DT|DR|D)$/i.test(w)) ? "d" : words.find(w => /^(КТ|К|KT|CT|CR|C)$/i.test(w)) ? "c" : "";
+      cur.parts.push(words.filter(w => !/^(ДТ|КТ|DT|CT|DR|CR)$/i.test(w)).join(" "));
+      if (cur.amount || !amts.length) return;
+      let pick = null, dir = "";
+      if (col) { amts.forEach(a => { let best = "", bd = 1e9; for (const h in col) { const dd = Math.abs(col[h] - a.x); if (dd < bd) { bd = dd; best = h; } }
+        if (!pick && (best === "d" || best === "c")) { pick = a; dir = best; } }); }
+      if (!pick) { pick = amts[0]; dir = mark || (/^-|-$/.test(pick.t) ? "d" : /^\+/.test(pick.t) ? "c" : ""); }
+      cur.amount = Math.abs(parseNum(pick.t.replace(/-$/, "")) || 0); cur.dir = mark && !col ? mark : dir;
+    });
+    flush();
+    return out;
+  }
   $("#bankBtn").onclick = () => $("#bankIn").click();
   $("#bankIn").onchange = async () => {
     const f = $("#bankIn").files[0]; $("#bankIn").value = ""; if (!f) return;
     const b = $("#bankBtn"); b.disabled = true; b.textContent = "Съпоставям…";
     try {
-      const rows = parseBankCsv(await f.text());
-      if (!rows.length) throw new Error("Не намерих плащания във файла. Свали извлечението от Булбанк Онлайн като CSV.");
+      const pdf = isPdfFile(f);
+      const rows = pdf ? await parseBankPdf(f) : parseBankCsv(await f.text());
+      if (!rows.length) throw new Error(pdf ? "Не намерих плащания (дебит) в PDF-а. Опитай с извлечението от Булбанк Онлайн като CSV." : "Не намерих плащания във файла. Свали извлечението от Булбанк Онлайн като CSV или PDF.");
       const r = await api("apiImportBank", rows);
       toast(`Извлечение: ${r.added} нови плащания. ${r.paid ? r.paid + " фактури са отбелязани като платени." : "Няма нови платени фактури."}${r.partial ? " " + r.partial + " — частично платени." : ""} Подробности в таблицата, лист „Банка“.`);
       await load(true, true);
