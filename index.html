@@ -172,6 +172,25 @@ button.sum{cursor:pointer}
 .rejectbox textarea{border:1px solid var(--line-strong);border-radius:7px;padding:9px;background:var(--bg);width:100%}
 .dfoot{display:flex;gap:8px;justify-content:space-between;flex-wrap:wrap;margin-top:auto;padding-top:6px}
 .hint{font-size:13px;color:var(--muted)}
+.bdrawer{width:min(760px,100%)}
+.bstats{display:grid;grid-template-columns:1fr 1fr;gap:1px;background:var(--line);border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.bstats>div{background:var(--paper);padding:10px 12px;display:flex;flex-direction:column;gap:2px;min-width:0}
+.bstats span{font-size:12px;text-transform:uppercase;letter-spacing:.07em;color:var(--muted)}
+.bstats b{font-family:var(--f-num);font-size:18px}
+.bstats small{color:var(--muted);font-size:13px}
+.blist{border:1px solid var(--line);border-radius:var(--r);overflow:hidden}
+.brow{display:flex;flex-direction:column;gap:6px;padding:10px 12px;border-top:1px solid var(--line);min-width:0}
+.brow:first-child{border-top:0}
+.bmeta{display:flex;align-items:center;gap:10px;flex-wrap:wrap}
+.bmeta b{margin-left:auto}
+.bmeta select,.bsel{border:1px solid var(--line-strong);border-radius:7px;padding:8px;background:var(--bg);min-width:0;max-width:100%;color:var(--ink)}
+.bsel{width:100%}
+.bdir{font-size:12px;font-weight:600;border-radius:4px;padding:1px 6px}
+.bdir.in{color:var(--paid);background:var(--paid-soft)} .bdir.out{color:var(--unpaid);background:var(--unpaid-soft)}
+.bdet{font-size:13px;color:var(--muted);overflow-wrap:anywhere}
+.bdet b{color:var(--ink);font-weight:600}
+.bto{font-size:14px;color:var(--muted)} .bto.ok{color:var(--paid);font-weight:500}
+.mono{font-family:var(--f-num)} .minus{color:var(--unpaid)}
 .toast{position:fixed;left:50%;bottom:calc(20px + env(safe-area-inset-bottom,0px));transform:translateX(-50%);background:var(--ink);color:var(--paper);padding:10px 16px;border-radius:8px;font-size:14px;z-index:30;max-width:calc(100% - 32px)}
 .notice{border:1px solid var(--line);background:var(--paper);border-radius:var(--r);padding:16px;color:var(--muted)}
 .bigpick.compact{padding:12px}
@@ -218,7 +237,7 @@ details.hist summary{cursor:pointer;font-weight:600;font-size:14px;padding:2px 0
 <div class="wrap">
   <header>
     <div><h1>Регистър фактури</h1><p class="sub" id="subLine">Зареждам…</p></div>
-    <div class="actions"><span class="pill" id="rolePill" hidden></span><span class="pill" id="syncDot" hidden>Записвам…</span><button class="btn" id="refreshBtn" type="button" hidden>Обнови</button><button class="btn" id="pkgBtn" type="button" hidden title="Изпраща Excel и файловете за избрания месец (или миналия) на счетоводителя">Към счетоводителя</button><button class="btn" id="bankBtn" type="button" hidden title="Качи извлечение от Булбанк Онлайн (CSV или PDF) — платените фактури се отбелязват сами">Банково извлечение</button><input type="file" id="bankIn" accept=".csv,text/csv,.pdf,application/pdf" hidden><button class="btn primary" id="exportBtn" type="button" hidden>Изтегли Excel</button></div>
+    <div class="actions"><span class="pill" id="rolePill" hidden></span><span class="pill" id="syncDot" hidden>Записвам…</span><button class="btn" id="refreshBtn" type="button" hidden>Обнови</button><button class="btn" id="pkgBtn" type="button" hidden title="Изпраща Excel и файловете за избрания месец (или миналия) на счетоводителя">Към счетоводителя</button><button class="btn" id="bankBtn" type="button" hidden title="Качи извлечение от която и да е банка (Excel, CSV, XML camt.053, MT940 или PDF) — входящите и изходящите плащания се разпределят по фактури">Банково извлечение</button><input type="file" id="bankIn" accept=".csv,.txt,.tsv,.xls,.xlsx,.xlsm,.ods,.xml,.sta,.mt940,.940,.pdf,text/csv,text/plain,application/xml,text/xml,application/pdf,application/vnd.ms-excel,application/vnd.openxmlformats-officedocument.spreadsheetml.sheet" hidden><button class="btn primary" id="exportBtn" type="button" hidden>Изтегли Excel</button></div>
   </header>
 
   <nav class="secnav" id="secNav" hidden aria-label="Раздел">
@@ -743,23 +762,170 @@ if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catc
     try { const r = await api("apiSendPackage", ym); toast(r.msg); } catch (e) { toast(errMsg(e)); } finally { b.disabled = false; reset(); }
   };
 
-  // ---------- банково извлечение (CSV от Булбанк Онлайн) ----------
-  function parseBankCsv(text) {
-    const lines = text.replace(/^\uFEFF/, "").split(/\r?\n/).filter(l => l.trim());
-    const sep = (lines[0] || "").split(";").length > (lines[0] || "").split(",").length ? ";" : ",";
+  // ---------- банково извлечение — от всяка банка, с входящи и изходящи плащания ----------
+  // Приема CSV/TXT, Excel (XLS/XLSX), XML (camt.053/052/054), MT940 и PDF с текст.
+  // Всеки ред става { date, amount, dir: "d" (изходящо) | "c" (входящо) | "", party, iban, details, ref }.
+  // Изходящите плащания се търсят сред входящите (доставни) фактури, входящите — сред изходящите фактури (от клиенти).
+  const bkNorm = t => String(t == null ? "" : t).toLowerCase().replace(/[^a-zа-я0-9]/g, "");
+  const BK_HEAD = [
+    ["dir", /^(дк|дткт|дебиткредит|dc|drcr|cd|dt|direction|debitcredit|creditdebit|знак|индикатор|тип|typ|type)$/],
+    ["debit", /дебит|debit|^(теглен|разход|изходящ|withdrawal|outflow|moneyout|paidout)|^(дт|dr)$/],
+    ["credit", /кредит|credit|^(постъплени|приход|входящ|deposit|inflow|moneyin|paidin)|^(кт|cr)$/],
+    ["date", /^(дата|вальор|date|bookingdate|bookdate|transactiondate|valuedate|postingdate|operationdate|datum|data)/],
+    ["bal", /^(салдо|наличност|balance|runningbalance)/],
+    ["cur", /^(валута|currency|ccy|вал)$/],
+    ["iban", /(iban|сметканаконтрагент|сметкананаредител|сметканаполучател|сметкакореспондент|counterpartyaccount|контрасметка)/],
+    ["party", /(контрагент|наредител|получател|бенефициент|бенефициер|кореспондент|вносител|counterparty|payer|payee|beneficiary|ordering|partner|^име|^наименование|^name)/],
+    ["ref", /^(референция|реф|ref|номернадокумент|номернаоперация|документ|transactionid|bankreference|idнаоперация)/],
+    ["details", /(основание|описание|детайли|details|description|narrative|purpose|информация|назначение|remittance|допълнителн|текст|бележк|коментар|reference|вид|kind|операция)/],
+    ["amount", /^(сума|amount|стойност|transactionamount|betrag|сумата)/],
+  ];
+  const bkDirVal = v => { const t = bkNorm(v); return /^(д|дт|дебит|d|dr|dt|debit|dbit|изх|изходящ|изходящо|out|withdrawal)$/.test(t) ? "d" : /^(к|кт|кредит|c|cr|ct|kt|credit|crdt|вх|входящ|входящо|in|deposit)$/.test(t) ? "c" : String(v || "").trim() === "-" ? "d" : String(v || "").trim() === "+" ? "c" : ""; };
+  const bkDate = v => {
+    if (v == null || v === "") return "";
+    if (v instanceof Date && !isNaN(v)) return new Date(v - v.getTimezoneOffset() * 60000).toISOString().slice(0, 10);
+    if (typeof v === "number" && v > 20000 && v < 80000) return new Date(Math.round((v - 25569) * 864e5)).toISOString().slice(0, 10);
+    const s = String(v).trim(); let m;
+    if ((m = s.match(/^(\d{4})[-./](\d{1,2})[-./](\d{1,2})/))) return `${m[1]}-${m[2].padStart(2, "0")}-${m[3].padStart(2, "0")}`;
+    if ((m = s.match(/^(\d{1,2})[-./](\d{1,2})[-./](\d{4}|\d{2})(?!\d)/))) return `${m[3].length === 2 ? "20" + m[3] : m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`;
+    if ((m = s.match(/^(\d{4})(\d{2})(\d{2})$/))) return `${m[1]}-${m[2]}-${m[3]}`;
+    return "";
+  };
+  // сума със знак: „-12,50“, „12,50-“, „(12,50)“, „1 234,56“, „1,234.56“, „1.234,56“, число от Excel
+  const bkAmt = v => {
+    if (v == null || v === "") return null;
+    if (typeof v === "number") return isNaN(v) ? null : r2(v);
+    const s = String(v).trim(); if (!/\d/.test(s) || /[a-zа-я]{4,}/i.test(s.replace(/\b(eur|bgn|лв|usd)\b/gi, ""))) return null;
+    const n = parseNum(s.replace(/-\s*$/, "").replace(/^\((.*)\)$/, "$1")); if (n == null) return null;
+    return /^\s*-|-\s*$|^\(.*\)$/.test(s) ? -Math.abs(n) : n;
+  };
+  const bkIban = t => { const m = String(t || "").replace(/\s+/g, "").toUpperCase().match(/[A-Z]{2}\d{2}[A-Z]{4}[A-Z0-9]{10,26}/); return m ? m[0] : ""; };
+  const bkSkip = t => /^\s*(начално|крайно|предходно|ново|текущо|разполагаемо)?\s*салдо|^\s*оборот|^\s*общо|^\s*итого|opening balance|closing balance|^\s*total/i.test(String(t || ""));
+
+  // Таблица (от CSV или Excel) → редове. Заглавният ред се търси в първите 40 реда.
+  function bankFromTable(T) {
+    T = T.map(r => (r || []).map(c => typeof c === "string" ? c.replace(/^﻿/, "").trim() : c));
+    let hi = -1, col = null;
+    for (let i = 0; i < Math.min(T.length, 40) && hi < 0; i++) {
+      const c = {}; c.details = [];
+      T[i].forEach((cell, j) => { const t = bkNorm(cell); if (!t || t.length > 40) return;
+        for (const [k, re] of BK_HEAD) if (re.test(t)) { if (k === "details") c.details.push(j); else if (c[k] == null) c[k] = j; break; } });
+      if (c.date != null && (c.amount != null || c.debit != null || c.credit != null)) { hi = i; col = c; }
+    }
+    if (hi < 0) return null;
+    const data = T.slice(hi + 1);
+    // колона с ДТ/КТ — по съдържанието, ако няма ясно заглавие
+    if (col.dir == null && col.debit == null) {
+      const n = (T[hi] || []).length;
+      for (let j = 0; j < n; j++) { if (j === col.date || j === col.amount) continue;
+        const vals = data.map(r => r[j]).filter(v => v != null && String(v).trim() !== "");
+        if (vals.length && vals.filter(v => bkDirVal(v)).length / vals.length > 0.8) { col.dir = j; col.details = col.details.filter(x => x !== j); break; } }
+    }
     const out = [];
-    lines.slice(1).forEach(l => {
-      const p = l.split(sep); if (p.length < 10) return;
-      const R = p.slice(-7), type = (R[3] || "").trim();
-      if (type && type !== "ДТ") return;
-      const m = (p[1] || "").trim().match(/^(\d{1,2})\.(\d{1,2})\.(\d{4})/); if (!m) return;
-      const amount = parseNum(R[0]); if (!amount) return;
-      out.push({ date: `${m[3]}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`, amount, details: p.slice(2, -7).join(sep).trim(), kind: (R[4] || "").trim(), ref: (R[5] || "").trim() });
+    data.forEach(r => {
+      const date = bkDate(r[col.date]); if (!date) return;
+      let amount = null, dir = "";
+      if (col.debit != null || col.credit != null) {
+        const d = col.debit != null ? bkAmt(r[col.debit]) : null, c = col.credit != null ? bkAmt(r[col.credit]) : null;
+        if (d) { amount = Math.abs(d); dir = "d"; } else if (c) { amount = Math.abs(c); dir = c < 0 ? "d" : "c"; }
+        else if (col.amount != null) { const a = bkAmt(r[col.amount]); if (a) { amount = Math.abs(a); dir = a < 0 ? "d" : ""; } }
+      } else {
+        const a = bkAmt(r[col.amount]); if (!a) return; amount = Math.abs(a);
+        dir = col.dir != null ? bkDirVal(r[col.dir]) : "";
+        if (!dir) dir = a < 0 ? "d" : "";
+      }
+      if (!amount) return;
+      const details = col.details.map(j => r[j]).filter(v => v != null && String(v).trim() !== "").join(" · ").replace(/\s+/g, " ").trim();
+      const party = col.party != null ? String(r[col.party] || "").trim() : "";
+      if (bkSkip(details) && !party) return;
+      let cur = col.cur != null ? String(r[col.cur] || "").trim().toUpperCase() : "";
+      out.push({ date, amount: cur === "BGN" ? r2(amount / RATE) : amount, dir, party, iban: bkIban(col.iban != null ? r[col.iban] : "") || bkIban(details), details, ref: col.ref != null ? String(r[col.ref] || "").trim() : "" });
     });
+    // ако няма никакви отрицателни суми и няма колона за посока — „без знак“ значи входящо само когато има и минуси
+    if (out.length && !out.some(x => x.dir) && col.dir == null) out.forEach(x => x.dir = "");
+    else if (out.some(x => x.dir === "d") && col.dir == null && col.debit == null && col.credit == null) out.forEach(x => { if (!x.dir) x.dir = "c"; });
     return out;
   }
+  function splitCsv(text) {
+    text = text.replace(/^﻿/, "");
+    const first = text.split(/\r?\n/).slice(0, 30).join("\n");
+    const cnt = ch => (first.match(new RegExp(ch === "|" ? "\\|" : ch, "g")) || []).length;
+    const sep = [";", "\t", ",", "|"].sort((a, b) => cnt(b) - cnt(a))[0];
+    const rows = []; let row = [], f = "", q = false;
+    for (let i = 0; i < text.length; i++) { const ch = text[i];
+      if (q) { if (ch === '"') { if (text[i + 1] === '"') { f += '"'; i++; } else q = false; } else f += ch; continue; }
+      if (ch === '"' && f.trim() === "") { q = true; f = ""; }
+      else if (ch === sep) { row.push(f); f = ""; }
+      else if (ch === "\n" || ch === "\r") { if (ch === "\r" && text[i + 1] === "\n") i++; row.push(f); rows.push(row); row = []; f = ""; }
+      else f += ch; }
+    if (f || row.length) { row.push(f); rows.push(row); }
+    return rows.filter(r => r.some(c => String(c).trim()));
+  }
+  // старият формат на Булбанк Онлайн (без разпознаваеми заглавия)
+  function bankBulbankCsv(T) {
+    const out = [];
+    T.slice(1).forEach(p => { if (p.length < 10) return;
+      const R = p.slice(-7), type = (R[3] || "").trim(), date = bkDate(p[1]), amount = Math.abs(bkAmt(R[0]) || 0); if (!date || !amount) return;
+      out.push({ date, amount, dir: type === "КТ" ? "c" : type === "ДТ" ? "d" : "", party: "", iban: bkIban(p.slice(2, -7).join(" ")), details: p.slice(2, -7).join(" ").trim(), kind: (R[4] || "").trim(), ref: (R[5] || "").trim() }); });
+    return out;
+  }
+  function parseBankText(text) {
+    if (/<\?xml|<Document[\s>]|<BkToCstmr/i.test(text.slice(0, 2000))) return parseCamt(text);
+    if (/^:20:|\n:20:|:61:\d{6}/.test(text)) return parseMt940(text);
+    const T = splitCsv(text);
+    return bankFromTable(T) || bankBulbankCsv(T);
+  }
+  // ISO 20022 camt.053 / camt.052 / camt.054
+  function parseCamt(text) {
+    const x = new DOMParser().parseFromString(text, "application/xml");
+    if (x.getElementsByTagName("parsererror").length) throw new Error("XML файлът е повреден.");
+    const kids = (el, name) => el ? [...el.getElementsByTagName("*")].filter(e => e.localName === name) : [];
+    const one = (el, ...path) => { let cur = el; for (const p of path) { cur = kids(cur, p)[0]; if (!cur) return ""; } return cur.textContent.trim(); };
+    return kids(x, "Ntry").map(n => {
+      const amtEl = [...n.children].find(e => e.localName === "Amt"), dir = one(n, "CdtDbtInd") === "DBIT" ? "d" : "c";
+      let amount = Math.abs(parseFloat(amtEl ? amtEl.textContent : "0") || 0); if (amtEl && amtEl.getAttribute("Ccy") === "BGN") amount = r2(amount / RATE);
+      const bd = [...n.children].find(e => e.localName === "BookgDt") || [...n.children].find(e => e.localName === "ValDt");
+      const date = bkDate(bd ? (one(bd, "Dt") || one(bd, "DtTm")) : "");
+      const side = dir === "d" ? "Cdtr" : "Dbtr";
+      const party = one(n, "RltdPties", side, "Nm") || one(n, "RltdPties", side, "Pty", "Nm") || one(n, side, "Nm");
+      const iban = one(n, "RltdPties", side + "Acct", "IBAN");
+      const details = [...kids(n, "Ustrd").map(e => e.textContent.trim()), one(n, "AddtlNtryInf"), one(n, "AddtlTxInf"), one(n, "Strd", "Ref")].filter(Boolean).join(" · ");
+      return { date, amount: r2(amount), dir, party, iban, details, ref: one(n, "AcctSvcrRef") || one(n, "EndToEndId") };
+    }).filter(r => r.date && r.amount);
+  }
+  // SWIFT MT940
+  function parseMt940(text) {
+    const out = []; let cur = null, inf = false, ccy = "";
+    text.replace(/\r/g, "").split("\n").forEach(l => {
+      let m;
+      if ((m = l.match(/^:60[FM]:[CD]\d{6}([A-Z]{3})/))) ccy = m[1];
+      if ((m = l.match(/^:61:(\d{2})(\d{2})(\d{2})(\d{4})?(R?[CD])[A-Z]?(\d+,\d{0,2})/))) {
+        if (cur) out.push(cur); inf = false;
+        const a = parseFloat(m[6].replace(",", "."));
+        cur = { date: `20${m[1]}-${m[2]}-${m[3]}`, amount: r2(ccy === "BGN" ? a / RATE : a), dir: m[5].slice(-1) === "D" ? (m[5][0] === "R" ? "c" : "d") : (m[5][0] === "R" ? "d" : "c"), party: "", iban: "", details: "", ref: (l.split("//")[1] || "").trim() };
+        return;
+      }
+      if (/^:86:/.test(l)) { inf = true; l = l.slice(4); } else if (/^:\d{2}[A-Z]?:/.test(l) || /^-}?$/.test(l)) { inf = false; return; }
+      if (inf && cur) {
+        const sub = l.match(/\?3[23]([^?]*)/g); if (sub) cur.party += sub.map(s => s.slice(3)).join("");
+        cur.details += (cur.details ? " " : "") + l.replace(/\?\d{2}/g, " ").trim();
+      }
+    });
+    if (cur) out.push(cur);
+    out.forEach(r => { r.details = r.details.replace(/\s+/g, " ").trim(); r.iban = bkIban(r.details); });
+    return out;
+  }
+  async function parseBankXlsx(file) {
+    if (!window.XLSX) throw new Error("Модулът за Excel не се зареди. Провери интернета.");
+    const wb = XLSX.read(new Uint8Array(await file.arrayBuffer()), { type: "array", cellDates: true });
+    for (const name of wb.SheetNames) {
+      const T = XLSX.utils.sheet_to_json(wb.Sheets[name], { header: 1, raw: true, defval: "" });
+      const r = bankFromTable(T); if (r && r.length) return r;
+    }
+    return [];
+  }
   // PDF извлечение: текстът се чете с pdf.js, редовете се сглобяват по позиция,
-  // а дебит/кредит се познава по колоната („Дебит“/„Кредит“), по маркер ДТ/КТ или по знака минус.
+  // а дебит/кредит се познава по колоната („Дебит“/„Кредит“), по маркер ДТ/КТ, по знака или по промяната на салдото.
   async function parseBankPdf(file) {
     const pdf = await (await loadPdf()).getDocument({ data: new Uint8Array(await file.arrayBuffer()), isEvalSupported: false }).promise;
     const lines = [];
@@ -767,56 +933,196 @@ if ("serviceWorker" in navigator) navigator.serviceWorker.register("sw.js").catc
       const tc = await (await pdf.getPage(pn)).getTextContent(), toks = [];
       tc.items.forEach(it => { const str = it.str || ""; if (!str.trim()) return;
         const x0 = it.transform[4], y = it.transform[5], w = it.width || str.length * 5;
-        str.replace(/[-+]?\d{1,3}(?:[ \u00a0]\d{3})+(?:[.,]\d{2})?-?(?!\S)|\S+/g, (t, i) => { toks.push({ t, x: x0 + w * (i + t.length / 2) / str.length, y }); return t; }); });
+        str.replace(/[-+]?\d{1,3}(?:[  ]\d{3})+(?:[.,]\d{2})?-?(?!\S)|\S+/g, (t, i) => { toks.push({ t, x: x0 + w * (i + t.length / 2) / str.length, y }); return t; }); });
       toks.sort((a, b) => b.y - a.y || a.x - b.x);
       const pl = [];
       toks.forEach(k => { const L = pl.find(l => Math.abs(l.y - k.y) < 3); L ? L.toks.push(k) : pl.push({ y: k.y, toks: [k] }); });
       pl.sort((a, b) => b.y - a.y).forEach(l => { l.toks.sort((a, b) => a.x - b.x); l.text = l.toks.map(k => k.t).join(" "); lines.push(l); });
     }
-    if (!lines.length) throw new Error("PDF-ът няма текст (вероятно е сканиран). Свали извлечението от Булбанк Онлайн като PDF или CSV.");
+    if (!lines.length) throw new Error("PDF-ът няма текст (вероятно е сканиран). Свали извлечението от онлайн банкирането като PDF, Excel или CSV.");
     let col = null;
     const head = t => { const T = t.toLowerCase().replace(/[^a-zа-я]/g, "");
-      return /^(дебит|дт|debit|dr|теглене|withdrawal)$/.test(T) ? "d" : /^(кредит|кт|credit|cr|постъпление|deposit)$/.test(T) ? "c" : /^(салдо|balance|наличност)$/.test(T) ? "b" : ""; };
-    const isAmt = t => /^[-+]?\d{1,3}(?:[ . ]?\d{3})*,\d{2}-?$|^[-+]?\d+\.\d{2}-?$/.test(t);
-    const dateRe = /^(\d{1,2})[./](\d{1,2})[./](\d{2}|\d{4})$/;
+      return /^(дебит|дт|debit|dr|теглене|разход|разходи|изходящи|withdrawal|withdrawals)$/.test(T) ? "d" : /^(кредит|кт|credit|cr|постъпление|постъпления|приход|приходи|входящи|deposit|deposits)$/.test(T) ? "c" : /^(салдо|balance|наличност)$/.test(T) ? "b" : ""; };
+    const isAmt = t => /^[-+]?\d{1,3}(?:[ . ]?\d{3})*,\d{2}-?$|^[-+]?\d{1,3}(?:,\d{3})+\.\d{2}-?$|^[-+]?\d+\.\d{2}-?$/.test(t);
+    const dateRe = /^(\d{1,2})[./-](\d{1,2})[./-](\d{2}|\d{4})$|^(\d{4})-(\d{2})-(\d{2})$/;
     const out = []; let cur = null;
-    const flush = () => { if (cur && cur.amount && cur.dir === "d") { const details = cur.parts.join(" ").replace(/\s+/g, " ").trim();
+    const flush = () => { if (cur && cur.amount) { const details = cur.parts.join(" ").replace(/\s+/g, " ").trim();
       const ref = (details.match(/\b(?=[A-Z0-9]*\d)(?=[A-Z0-9]*[A-Z])[A-Z0-9]{10,}\b/) || [""])[0];
-      out.push({ date: cur.date, amount: cur.amount, details, kind: "", ref }); } cur = null; };
+      out.push({ date: cur.date, amount: cur.amount, dir: cur.dir, bal: cur.bal, party: "", iban: bkIban(details), details, ref }); } cur = null; };
     lines.forEach(l => {
-      // заглавен ред с колоните
       const hs = l.toks.map(k => ({ h: head(k.t), x: k.x })).filter(o => o.h);
       if (hs.some(o => o.h === "d") && hs.some(o => o.h === "c")) { flush(); col = {}; hs.forEach(o => col[o.h] = o.x); return; }
-      if (/салдо|оборот|общо|total|balance|итого/i.test(l.text) && !dateRe.test(l.toks[0].t)) { flush(); return; }
-      const m = l.toks[0].t.match(dateRe);
-      if (m) { flush(); const y = m[3].length === 2 ? "20" + m[3] : m[3];
-        cur = { date: `${y}-${m[2].padStart(2, "0")}-${m[1].padStart(2, "0")}`, amount: 0, dir: "", parts: [] }; }
+      const di = l.toks.slice(0, 3).findIndex(k => dateRe.test(k.t));
+      if (bkSkip(l.text) && di < 0) { flush(); return; }
+      if (di >= 0) { flush(); cur = { date: bkDate(l.toks[di].t), amount: 0, dir: "", bal: null, parts: [] }; }
       if (!cur) return;
       const amts = [], words = [];
-      l.toks.forEach((k, i) => { if (isAmt(k.t)) amts.push(k); else if (!(i < 2 && dateRe.test(k.t))) words.push(k.t); });
+      l.toks.forEach((k, i) => { if (isAmt(k.t)) amts.push(k); else if (!(i < 3 && dateRe.test(k.t))) words.push(k.t); });
       const mark = words.find(w => /^(ДТ|Д|DT|DR|D)$/i.test(w)) ? "d" : words.find(w => /^(КТ|К|KT|CT|CR|C)$/i.test(w)) ? "c" : "";
       cur.parts.push(words.filter(w => !/^(ДТ|КТ|DT|CT|DR|CR)$/i.test(w)).join(" "));
       if (cur.amount || !amts.length) return;
       let pick = null, dir = "";
       if (col) { amts.forEach(a => { let best = "", bd = 1e9; for (const h in col) { const dd = Math.abs(col[h] - a.x); if (dd < bd) { bd = dd; best = h; } }
-        if (!pick && (best === "d" || best === "c")) { pick = a; dir = best; } }); }
-      if (!pick) { pick = amts[0]; dir = mark || (/^-|-$/.test(pick.t) ? "d" : /^\+/.test(pick.t) ? "c" : ""); }
+        if (best === "b") cur.bal = bkAmt(a.t.replace(/[ .](?=\d{3})/g, ""));
+        else if (!pick && (best === "d" || best === "c")) { pick = a; dir = best; } }); }
+      if (!pick) { pick = amts[0]; dir = mark || (/^-|-$/.test(pick.t) ? "d" : /^\+/.test(pick.t) ? "c" : "");
+        if (!col && amts.length > 1) cur.bal = bkAmt(amts[amts.length - 1].t); }
       cur.amount = Math.abs(parseNum(pick.t.replace(/-$/, "")) || 0); cur.dir = mark && !col ? mark : dir;
     });
     flush();
+    // посока по салдото: ако салдото е намаляло — изходящо, ако е нараснало — входящо
+    out.forEach((r, i) => { if (r.dir || r.bal == null) return; const p = out[i - 1];
+      if (p && p.bal != null) { const dlt = r2(r.bal - p.bal); if (Math.abs(Math.abs(dlt) - r.amount) < 0.02) r.dir = dlt < 0 ? "d" : "c"; } });
+    if (!col && out.some(r => r.dir === "d") && !out.some(r => r.dir === "c")) out.forEach(r => { if (!r.dir) r.dir = "c"; }); // само минуси → без знак е входящо
+    out.forEach(r => delete r.bal);
     return out;
   }
+  async function readBankFile(f) {
+    const n = f.name.toLowerCase();
+    if (isPdfFile(f)) return parseBankPdf(f);
+    if (/\.(xlsx|xls|xlsm|ods)$/.test(n) || /spreadsheet|excel/.test(f.type)) return parseBankXlsx(f);
+    const buf = new Uint8Array(await f.arrayBuffer());
+    if (buf[0] === 0x50 && buf[1] === 0x4b || buf[0] === 0xd0 && buf[1] === 0xcf) return parseBankXlsx(f); // Excel без разширение
+    let text = new TextDecoder("utf-8").decode(buf);
+    if ((text.match(/�/g) || []).length > 3) text = new TextDecoder("windows-1251").decode(buf); // стари експорти на кирилица
+    return parseBankText(text);
+  }
+
+  // ---------- съпоставяне: кое плащане към коя фактура ----------
+  const bkKey = r => [r.date, r.dir, r.amount.toFixed(2), r.ref || normS(r.details).slice(0, 40)].join("|");
+  const bkDone = () => { try { return new Set(JSON.parse(localStorage.getItem("fakturi_bank_done") || "[]")); } catch (e) { return new Set(); } };
+  const bkMark = keys => { try { const s = bkDone(); keys.forEach(k => s.add(k)); localStorage.setItem("fakturi_bank_done", JSON.stringify([...s].slice(-3000))); } catch (e) {} };
+  const candsFor = dir => dir === "d"
+    ? S.register.filter(o => !isPaid(o)).map(o => ({ o, kind: "in", id: o.id, party: o.supplier, due: dueE(o), tot: eur(o), label: (o.supplier || "Без доставчик") + (o.number ? " № " + o.number : "") }))
+    : dir === "c" ? (S.out || []).filter(o => !isPaid(o)).map(o => ({ o, kind: "out", id: o.id, party: o.client, due: oDue(o), tot: oTot(o), label: (o.client || "Без клиент") + (o.number ? " № " + o.number : "") })) : [];
+  function bkScore(r, c) {
+    const text = r.party + " " + r.details + " " + r.ref, nums = new Set((text.match(/\d+/g) || []).map(d => d.replace(/^0+/, ""))), o = c.o;
+    let s = 0, ev = 0;
+    const nn = normN(o.number); if (nn.length >= 2 && nums.has(nn)) { s += nn.length >= 4 ? 50 : 25; ev++; }
+    const eik = normN(o.eik); if (eik.length >= 9 && nums.has(eik)) { s += 30; ev++; }
+    if (o.iban && r.iban && bkIban(o.iban) === r.iban) { s += 40; ev++; }
+    const pn = normS(c.party), tn = normS(text), rp = normS(r.party);
+    if (pn.length >= 4 && (tn.includes(pn) || (rp.length >= 4 && pn.includes(rp)))) { s += 30; ev++; }
+    else { const w = String(c.party || "").toLowerCase().split(/[^a-zа-я0-9]+/).filter(x => x.length >= 4 && !/^(еоод|оод|ead|eood|ltd|фирма|търговия)$/.test(x)); if (w.some(x => tn.includes(normS(x)))) { s += 15; ev++; } }
+    const amt = Math.abs(r.amount - c.due) < 0.011 ? 40 : Math.abs(r.amount - c.tot) < 0.011 ? 35 : 0; s += amt;
+    if (!amt && !(r.amount < c.due && ev && s >= 30)) return 0; // без съвпадение на сумата — само частично плащане с ясна връзка
+    if (o.date && r.date && String(o.date).slice(0, 10) > r.date) s -= 20;
+    if (!ev && amt) { if (rp.length >= 4) return 1; s = 30; } // само сумата съвпада, а името е друго → не се избира само
+    return s;
+  }
+  function bkMatchAll(rows) {
+    const pairs = [];
+    rows.forEach((r, i) => { r.cands = candsFor(r.dir).map(c => ({ c, s: bkScore(r, c) })).sort((a, b) => b.s - a.s); r.pick = ""; r.auto = "";
+      r.cands.forEach(x => { if (x.s >= 40) pairs.push({ i, x }); });
+      const same = r.cands.filter(x => x.s === 30); if (!r.party && same.length === 1 && !r.cands.some(x => x.s >= 40)) pairs.push({ i, x: same[0] }); });
+    const used = new Set();
+    pairs.sort((a, b) => b.x.s - a.x.s).forEach(({ i, x }) => { const r = rows[i]; if (r.pick || used.has(x.c.id) || r.done) return;
+      const tie = r.cands.filter(y => y.s === x.s && !used.has(y.c.id)).length > 1; if (tie && x.s < 70) return; // равни кандидати — нека човек избере
+      r.pick = r.auto = x.c.id; used.add(x.c.id); });
+  }
+
+  // ---------- преглед на извлечението ----------
+  let BK = null;
+  function bankOpen(rows, fname) {
+    const done = bkDone();
+    rows.forEach(r => { r.done = done.has(bkKey(r)); });
+    bkMatchAll(rows);
+    BK = { rows, fname, f: "all", result: null };
+    if (!$("#bScrim")) {
+      const d = document.createElement("div"); d.className = "scrim"; d.id = "bScrim"; d.hidden = true;
+      d.innerHTML = `<div class="drawer bdrawer"><div class="dh"><h3 id="bTitle">Банково извлечение</h3><button class="x" type="button" id="bClose" aria-label="Затвори">×</button></div><div id="bBody" class="bbody"></div><div class="dfoot" id="bFoot"></div></div>`;
+      document.body.appendChild(d);
+      d.onclick = e => { if (e.target.id === "bScrim" || e.target.closest("#bClose") || e.target.closest("[data-bclose]")) d.hidden = true; };
+      d.addEventListener("change", e => { const s = e.target.closest("[data-bpick]"), dd = e.target.closest("[data-bdir]");
+        if (s) BK.rows[+s.dataset.bpick].pick = s.value;
+        if (dd) { const r = BK.rows[+dd.dataset.bdir]; r.dir = dd.value; r.cands = candsFor(r.dir).map(c => ({ c, s: bkScore(r, c) })).sort((a, b) => b.s - a.s); r.pick = r.cands[0] && r.cands[0].s >= 40 ? r.cands[0].c.id : ""; bankRender(); } });
+      d.addEventListener("click", e => { const f = e.target.closest("[data-bf]"); if (f) { BK.f = f.dataset.bf; bankRender(); } });
+      document.addEventListener("keydown", e => { if (e.key === "Escape" && !d.hidden) d.hidden = true; });
+    }
+    bankRender(); $("#bScrim").hidden = false;
+  }
+  function bankRender() {
+    const R = BK.rows, sum = a => money(r2(a.reduce((t, r) => t + r.amount, 0)));
+    const inc = R.filter(r => r.dir === "c"), outg = R.filter(r => r.dir === "d"), unk = R.filter(r => !r.dir);
+    $("#bTitle").textContent = BK.result ? "Извлечението е записано" : "Банково извлечение";
+    const head = `<div class="bstats"><div><span>Входящи</span><b class="ok">${sum(inc)}</b><small>${inc.length} плащания · ${inc.filter(r => r.pick).length} към фактури</small></div><div><span>Изходящи</span><b class="minus">${sum(outg)}</b><small>${outg.length} плащания · ${outg.filter(r => r.pick).length} към фактури</small></div></div>`
+      + (unk.length ? `<p class="status rej">${unk.length} реда без ясна посока — избери „Входящо“ или „Изходящо“ за тях.</p>` : "")
+      + `<p class="hint">${esc(BK.fname)} · ${R.length} операции. ${BK.result ? "Ето къде отиде всяко плащане." : "Провери към коя фактура отива всяко плащане и натисни „Запиши“. Входящите плащания се търсят сред изходящите фактури (от клиенти), изходящите — сред входящите фактури (към доставчици)."}</p>`;
+    const chips = `<div class="chips">${[["all", "Всички"], ["c", "Входящи"], ["d", "Изходящи"], ["none", "Без фактура"]].map(([k, l]) => `<button type="button" class="chip" data-bf="${k}" aria-pressed="${BK.f === k}">${l}</button>`).join("")}</div>`;
+    const vis = R.map((r, i) => [r, i]).filter(([r]) => BK.f === "all" || (BK.f === "none" ? !r.pick : r.dir === BK.f));
+    const rowH = ([r, i]) => {
+      const lab = r.dir === "c" ? '<span class="bdir in">↓ Входящо</span>' : r.dir === "d" ? '<span class="bdir out">↑ Изходящо</span>' : "";
+      const dirSel = (!r.dir || r.manualDir) && !BK.result ? `<select data-bdir="${i}"><option value="">Посока?</option><option value="c"${r.dir === "c" ? " selected" : ""}>↓ Входящо</option><option value="d"${r.dir === "d" ? " selected" : ""}>↑ Изходящо</option></select>` : lab;
+      if (!r.dir) r.manualDir = true;
+      let to;
+      if (BK.result) { const res = BK.result[i]; to = `<div class="bto ${res && res.ok ? "ok" : ""}">${res ? esc(res.text) : "—"}</div>`; }
+      else if (r.done) to = `<div class="bto">Вече е записано при предишно качване</div>`;
+      else if (!r.dir) to = `<div class="bto">Избери посока</div>`;
+      else {
+        const top = r.cands.filter(x => x.s > 0), rest = r.cands.filter(x => x.s <= 0).sort((a, b) => String(b.c.o.date || "").localeCompare(String(a.c.o.date || "")));
+        const opt = x => `<option value="${esc(x.c.id)}"${x.c.id === r.pick ? " selected" : ""}>${esc(x.c.label)} — ${money(x.c.due)}${x.c.o.date ? " · " + fmtDate(x.c.o.date) : ""}${x.c.id === r.auto ? " ✓" : ""}</option>`;
+        to = `<select class="bsel" data-bpick="${i}"><option value="">— не е по фактура —</option>${top.length ? `<optgroup label="Подходящи">${top.map(opt).join("")}</optgroup>` : ""}${rest.length ? `<optgroup label="Други неплатени ${r.dir === "c" ? "изходящи" : "входящи"} фактури">${rest.map(opt).join("")}</optgroup>` : ""}</select>`;
+      }
+      return `<div class="brow"><div class="bmeta"><span class="mono">${fmtDate(r.date)}</span>${dirSel}<b class="mono ${r.dir === "c" ? "ok" : r.dir === "d" ? "minus" : ""}">${r.dir === "d" ? "−" : r.dir === "c" ? "+" : ""}${money(r.amount)}</b></div><div class="bdet"><b>${esc(r.party || "")}</b> ${esc(r.details || "")}${r.iban ? ` <span class="mono">${esc(r.iban)}</span>` : ""}</div>${to}</div>`;
+    };
+    $("#bBody").innerHTML = head + chips + `<div class="blist">${vis.length ? vis.map(rowH).join("") : '<p class="hint">Няма редове.</p>'}</div>`;
+    $("#bFoot").innerHTML = BK.result ? '<span></span><button type="button" class="btn primary" data-bclose>Готово</button>'
+      : `<span class="hint">${R.filter(r => r.pick && !r.done).length} плащания ще отбележат фактури</span><div class="actions"><button type="button" class="btn" data-bclose>Отказ</button><button type="button" class="btn primary" id="bSave">Запиши</button></div>`;
+    const sv = $("#bSave"); if (sv) sv.onclick = () => run(sv, "Записвам…", bankApply);
+  }
+  const payState = (paidBefore, add, total) => { const p = r2(paidBefore + add); return p >= total - 0.01 ? { payment: "Платена", paidAmount: null } : { payment: "Частично", paidAmount: p }; };
+  async function bankApply() {
+    const R = BK.rows, res = {};
+    if (R.some(r => !r.dir && !r.done)) { const n = R.filter(r => !r.dir).length; if (!BK.warned) { BK.warned = 1; throw new Error(`${n} реда нямат посока и ще бъдат пропуснати. Натисни „Запиши“ пак, за да продължиш.`); } }
+    const before = new Map(S.register.map(o => [o.id, paidE(o)]));
+    // 1) изходящите плащания — в листа „Банка“ на сървъра (той отбелязва доставните фактури)
+    const deb = R.map((r, i) => [r, i]).filter(([r]) => r.dir === "d" && !r.done);
+    let srv = null;
+    if (deb.length) srv = await api("apiImportBank", deb.map(([r]) => ({ date: r.date, amount: r.amount, details: [r.party, r.details].filter(Boolean).join(" · "), kind: r.kind || "", ref: r.ref, iban: r.iban, invoiceId: r.pick || "" })));
+    // 2) входящите плащания — отбелязват изходящите фактури
+    const cr = R.map((r, i) => [r, i]).filter(([r]) => r.dir === "c" && !r.done);
+    for (const [r, i] of cr) {
+      const o = r.pick && (S.out || []).find(x => x.id === r.pick);
+      if (!o) { res[i] = { text: "Не е по фактура" }; continue; }
+      const st = payState(oPaid(o), r.amount, oTot(o));
+      const f = { id: o.id, client: o.client || "", eik: o.eik || "", category: o.category || "", number: o.number || "", date: o.date || "", due: o.due || "", note: o.note || "",
+        net: o.net, vat: o.vat, total: o.total, vatRate: o.vatRate, payment: st.payment, method: "Банка", paidDate: r.date, paidAmount: st.paidAmount };
+      try { const x = await api("apiOutSave", f); const j = S.out.findIndex(y => y.id === x.o.id); if (j >= 0) S.out[j] = x.o;
+        res[i] = { ok: 1, text: `→ Изходяща фактура: ${o.client || "клиент"}${o.number ? " № " + o.number : ""} — ${st.payment === "Платена" ? "платена" : "частично (" + money(st.paidAmount) + ")"}` };
+      } catch (e) { res[i] = { text: "Грешка: " + errMsg(e) }; }
+    }
+    await load(true, true);
+    // 3) изходящи плащания, които сървърът не е вързал, а са избрани ръчно — отбелязват се тук
+    for (const [r, i] of deb) {
+      let o = S.register.find(x => x.id === r.pick);
+      if (o && paidE(o) <= (before.get(o.id) || 0) + 0.005 && !isPaid(o)) {
+        const st = payState(paidE(o), r.amount, eur(o));
+        const f = { supplier: o.supplier || "", eik: o.eik || "", number: o.number || "", date: o.date || "", due: o.due || "", note: o.note || "", paidDate: r.date, iban: o.iban || "", category: o.category || "", currency: o.currency || "EUR",
+          net: o.net, vat: o.vat, total: o.total, vatRate: o.vatRate, payment: st.payment, method: "Банка", paidAmount: st.paidAmount != null && o.currency === "BGN" ? r2(st.paidAmount * RATE) : st.paidAmount };
+        try { const x = await api("apiUpdate", o.id, f); if (x && x.o) { putList("register", x.o); o = x.o; } } catch (e) { res[i] = { text: "Грешка: " + errMsg(e) }; continue; }
+      }
+      if (o && paidE(o) > (before.get(o.id) || 0) + 0.005) { before.set(o.id, 1e12); res[i] = { ok: 1, text: `→ Входяща фактура: ${o.supplier || "доставчик"}${o.number ? " № " + o.number : ""} — ${isPaid(o) ? "платена" : "частично"}` }; }
+    }
+    // фактури, отбелязани от сървъра по негова преценка
+    S.register.forEach(o => { const b = before.get(o.id); if (b == null || b > 1e11 || paidE(o) <= b + 0.005) return;
+      const hit = deb.find(([r, i]) => !res[i] && Math.abs(r.amount - r2(paidE(o) - b)) < 0.02);
+      if (hit) res[hit[1]] = { ok: 1, text: `→ Входяща фактура: ${o.supplier || "доставчик"}${o.number ? " № " + o.number : ""} — ${isPaid(o) ? "платена" : "частично"}` }; });
+    deb.forEach(([r, i]) => { if (!res[i]) res[i] = { text: "Записано в лист „Банка“, без фактура" }; });
+    R.forEach((r, i) => { if (r.done) res[i] = { text: "Вече беше записано" }; else if (!r.dir) res[i] = { text: "Пропуснато — без посока" }; });
+    bkMark(R.filter(r => r.dir && !r.done).map(bkKey));
+    BK.result = res; BK.f = "all"; changed(); bankRender();
+    const ok = Object.values(res).filter(x => x.ok).length;
+    toast(`Извлечение: ${cr.length} входящи и ${deb.length} изходящи плащания. ${ok} фактури са отбелязани.${srv && srv.added != null ? " Нови в лист „Банка“: " + srv.added + "." : ""}`);
+  }
+
   $("#bankBtn").onclick = () => $("#bankIn").click();
   $("#bankIn").onchange = async () => {
     const f = $("#bankIn").files[0]; $("#bankIn").value = ""; if (!f) return;
-    const b = $("#bankBtn"); b.disabled = true; b.textContent = "Съпоставям…";
+    const b = $("#bankBtn"); b.disabled = true; b.textContent = "Чета…";
     try {
-      const pdf = isPdfFile(f);
-      const rows = pdf ? await parseBankPdf(f) : parseBankCsv(await f.text());
-      if (!rows.length) throw new Error(pdf ? "Не намерих плащания (дебит) в PDF-а. Опитай с извлечението от Булбанк Онлайн като CSV." : "Не намерих плащания във файла. Свали извлечението от Булбанк Онлайн като CSV или PDF.");
-      const r = await api("apiImportBank", rows);
-      toast(`Извлечение: ${r.added} нови плащания. ${r.paid ? r.paid + " фактури са отбелязани като платени." : "Няма нови платени фактури."}${r.partial ? " " + r.partial + " — частично платени." : ""} Подробности в таблицата, лист „Банка“.`);
-      await load(true, true);
+      const rows = (await readBankFile(f)).filter(r => r && r.date && r.amount > 0);
+      if (!rows.length) throw new Error("Не намерих плащания във файла. Свали извлечението от онлайн банкирането като Excel, CSV, XML (camt.053), MT940 или PDF.");
+      bankOpen(rows, f.name);
     } catch (e) { toast(errMsg(e)); }
     finally { b.disabled = false; b.textContent = "Банково извлечение"; }
   };
